@@ -50,8 +50,20 @@ func (h *DeviationAnalysisHandler) Run(c *gin.Context) {
 	}
 	respond(c, status, result, err)
 }
-func (h *DeviationAnalysisHandler) Transition(c *gin.Context) {
+func (h *DeviationAnalysisHandler) SubmitPhaseReview(c *gin.Context) {
 	id, err := util.ParseUintParam(c, "id")
+	if err != nil {
+		util.Fail(c, err)
+		return
+	}
+	var request dto.PhaseReviewDecisionRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	result, serviceErr := h.service.SubmitPhaseReview(c.Request.Context(), id, request, mustActor(c))
+	respond(c, http.StatusOK, result, serviceErr)
+}
+func (h *DeviationAnalysisHandler) Transition(c *gin.Context) {	id, err := util.ParseUintParam(c, "id")
 	if err != nil {
 		util.Fail(c, err)
 		return

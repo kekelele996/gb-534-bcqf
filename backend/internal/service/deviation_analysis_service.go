@@ -1,10 +1,8 @@
 package service
+
 import (
 	"context"
 	"errors"
-	"net/http"
-	"strings"
-	"time"
 	"fermentation-kinetics-deviation-analysis/backend/internal/algorithm"
 	"fermentation-kinetics-deviation-analysis/backend/internal/constants"
 	"fermentation-kinetics-deviation-analysis/backend/internal/dto"
@@ -12,25 +10,32 @@ import (
 	"fermentation-kinetics-deviation-analysis/backend/internal/repository"
 	"fermentation-kinetics-deviation-analysis/backend/internal/util"
 	"gorm.io/gorm"
+	"net/http"
+	"strings"
+	"time"
 )
+
 type DeviationAnalysisService struct {
-	analyses  repository.DeviationAnalysisRepository
-	recipes   repository.CultureRecipeRepository
-	series    repository.SensorSeriesRepository
-	audits    repository.AuditRepository
-	evaluator *algorithm.Evaluator
-	now       func() time.Time
+	analyses     repository.DeviationAnalysisRepository
+	phaseReviews repository.PhaseReviewRepository
+	recipes      repository.CultureRecipeRepository
+	series       repository.SensorSeriesRepository
+	audits       repository.AuditRepository
+	evaluator    *algorithm.Evaluator
+	now          func() time.Time
 }
+
 func NewDeviationAnalysisService(
 	analyses repository.DeviationAnalysisRepository,
+	phaseReviews repository.PhaseReviewRepository,
 	recipes repository.CultureRecipeRepository,
 	series repository.SensorSeriesRepository,
 	audits repository.AuditRepository,
 	evaluator *algorithm.Evaluator,
 ) *DeviationAnalysisService {
 	return &DeviationAnalysisService{
-		analyses: analyses, recipes: recipes, series: series, audits: audits, evaluator: evaluator,
-		now: func() time.Time { return time.Now().UTC() },
+		analyses: analyses, phaseReviews: phaseReviews, recipes: recipes, series: series, audits: audits,
+		evaluator: evaluator, now: func() time.Time { return time.Now().UTC() },
 	}
 }
 func (s *DeviationAnalysisService) Run(
@@ -66,12 +71,14 @@ func (s *DeviationAnalysisService) Run(
 		if prior.InputHash != inputHash {
 			return dto.DeviationAnalysisResponse{}, false, util.NewError(http.StatusConflict, util.CodeConflict, "Idempotency-Key is already bound to a different input")
 		}
-		return dto.NewDeviationAnalysisResponse(prior), true, nil
+		response, attachErr := s.attachPhaseReviews(ctx, prior)
+		return response, true, attachErr
 	} else if !errors.Is(findErr, gorm.ErrRecordNotFound) {
 		return dto.DeviationAnalysisResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to check idempotency key", findErr)
 	}
 	if prior, findErr := s.analyses.FindByInput(ctx, inputHash, algorithm.Version); findErr == nil {
-		return dto.NewDeviationAnalysisResponse(prior), true, nil
+		response, attachErr := s.attachPhaseReviews(ctx, prior)
+		return response, true, attachErr
 	} else if !errors.Is(findErr, gorm.ErrRecordNotFound) {
 		return dto.DeviationAnalysisResponse{}, false, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to check frozen input", findErr)
 	}
@@ -90,7 +97,8 @@ func (s *DeviationAnalysisService) Run(
 	}
 	if err := s.analyses.Create(ctx, &analysis); err != nil {
 		if prior, findErr := s.analyses.FindByInput(ctx, inputHash, algorithm.Version); findErr == nil {
-			return dto.NewDeviationAnalysisResponse(prior), true, nil
+			response, attachErr := s.attachPhaseReviews(ctx, prior)
+			return response, true, attachErr
 		}
 		return dto.DeviationAnalysisResponse{}, false, util.WrapError(http.StatusConflict, util.CodeConflict, "analysis was queued concurrently", err)
 	}
@@ -128,7 +136,8 @@ func (s *DeviationAnalysisService) Run(
 		inputHash, algorithm.Version, duration); err != nil {
 		return dto.DeviationAnalysisResponse{}, false, err
 	}
-	return dto.NewDeviationAnalysisResponse(analysis), false, nil
+	response, attachErr := s.attachPhaseReviews(ctx, analysis)
+	return response, false, attachErr
 }
 func (s *DeviationAnalysisService) Get(ctx context.Context, id uint) (dto.DeviationAnalysisResponse, error) {
 	analysis, err := s.analyses.GetByID(ctx, id, true)
@@ -138,7 +147,32 @@ func (s *DeviationAnalysisService) Get(ctx context.Context, id uint) (dto.Deviat
 		}
 		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load deviation analysis", err)
 	}
-	return dto.NewDeviationAnalysisResponse(analysis), nil
+	return s.attachPhaseReviews(ctx, analysis)
+}
+
+// attachPhaseReviews fills per-phase reviewer conclusions and the remaining
+// high-risk phases that block confirmation.
+func (s *DeviationAnalysisService) attachPhaseReviews(
+	ctx context.Context, analysis model.DeviationAnalysis,
+) (dto.DeviationAnalysisResponse, error) {
+	response := dto.NewDeviationAnalysisResponse(analysis)
+	reviews, err := s.phaseReviews.ListByAnalysis(ctx, analysis.ID)
+	if err != nil {
+		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load phase reviews", err)
+	}
+	response.PhaseReviews = make([]dto.PhaseReviewResponse, 0, len(reviews))
+	reviewsByPhase := make(map[string]dto.PhaseReviewResponse, len(reviews))
+	for _, review := range reviews {
+		item := dto.NewPhaseReviewResponse(review)
+		response.PhaseReviews = append(response.PhaseReviews, item)
+		reviewsByPhase[review.Phase] = item
+	}
+	pending, err := PendingHighRiskPhases(analysis.PhaseScoresJSON, reviewsByPhase)
+	if err != nil {
+		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to evaluate pending phase reviews", err)
+	}
+	response.PendingPhaseReviews = pending
+	return response, nil
 }
 func (s *DeviationAnalysisService) List(
 	ctx context.Context, query dto.DeviationAnalysisQuery,
@@ -151,7 +185,11 @@ func (s *DeviationAnalysisService) List(
 		Items: make([]dto.DeviationAnalysisResponse, 0, len(analyses)), Total: total, Page: query.Page, Size: query.PageSize,
 	}
 	for _, analysis := range analyses {
-		response.Items = append(response.Items, dto.NewDeviationAnalysisResponse(analysis))
+		item, attachErr := s.attachPhaseReviews(ctx, analysis)
+		if attachErr != nil {
+			return dto.DeviationAnalysisListResponse{}, attachErr
+		}
+		response.Items = append(response.Items, item)
 	}
 	return response, nil
 }
@@ -170,9 +208,19 @@ func (s *DeviationAnalysisService) Transition(
 		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeStateTransition,
 			"illegal analysis transition from "+analysis.AnalysisState+" to "+request.ToState)
 	}
-	if to == constants.AnalysisConfirmed && !analysis.ReviewerSeparated(actor.UserID) {
-		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeReviewerConflict,
-			"analysis initiator cannot confirm their own result")
+	if to == constants.AnalysisConfirmed {
+		if !analysis.ReviewerSeparated(actor.UserID) {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeReviewerConflict,
+				"analysis initiator cannot confirm their own result")
+		}
+		pending, pendingErr := s.pendingForConfirmation(ctx, analysis)
+		if pendingErr != nil {
+			return dto.DeviationAnalysisResponse{}, pendingErr
+		}
+		if len(pending) > 0 {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeStateTransition,
+				"confirmation is blocked until every high-risk phase (weighted deviation >= 20%) has a conclusive review")
+		}
 	}
 	before := analysis
 	updates := map[string]any{"review_comment": strings.TrimSpace(request.Comment)}

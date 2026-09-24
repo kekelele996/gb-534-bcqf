@@ -63,7 +63,7 @@ func TestAnalysisIdempotencyReviewerSeparationAndReplay(t *testing.T) {
 	if err := seriesRepo.Create(context.Background(), &series); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewDeviationAnalysisService(analysisRepo, recipeRepo, seriesRepo, auditRepo, algorithm.NewEvaluator())
+	svc := NewDeviationAnalysisService(analysisRepo, repository.NewPhaseReviewRepository(db), recipeRepo, seriesRepo, auditRepo, algorithm.NewEvaluator())
 	initiator := util.Actor{UserID: 9, Username: "analyst", Role: "data_analyst", RequestID: "req-run"}
 	first, reused, err := svc.Run(context.Background(), dto.RunDeviationAnalysisRequest{SensorSeriesID: series.ID}, "idem-a", initiator)
 	if err != nil || reused {
@@ -104,7 +104,8 @@ func TestAnalysisIdempotencyReviewerSeparationAndReplay(t *testing.T) {
 func TestRunRequiresReadySeriesAndIdempotencyKey(t *testing.T) {
 	db := newTestDB(t)
 	svc := NewDeviationAnalysisService(
-		repository.NewDeviationAnalysisRepository(db), repository.NewCultureRecipeRepository(db),
+		repository.NewDeviationAnalysisRepository(db), repository.NewPhaseReviewRepository(db),
+		repository.NewCultureRecipeRepository(db),
 		repository.NewSensorSeriesRepository(db), repository.NewAuditRepository(db), algorithm.NewEvaluator(),
 	)
 	_, _, err := svc.Run(context.Background(), dto.RunDeviationAnalysisRequest{SensorSeriesID: 99}, "", util.Actor{})

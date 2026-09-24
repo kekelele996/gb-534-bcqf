@@ -39,6 +39,8 @@ type DeviationAnalysisResponse struct {
 	ReviewComment        string                `json:"review_comment,omitempty"`
 	ReplayVerified       *bool                 `json:"replay_verified,omitempty"`
 	SensorSeries         *SensorSeriesResponse `json:"sensor_series,omitempty"`
+	PhaseReviews         []PhaseReviewResponse `json:"phase_reviews"`
+	PendingPhaseReviews  []PendingPhaseReview  `json:"pending_phase_reviews"`
 	CreatedAt            time.Time             `json:"created_at"`
 	UpdatedAt            time.Time             `json:"updated_at"`
 }
