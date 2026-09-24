@@ -27,6 +27,10 @@ type DeviationAnalysis struct {
 	ReplayVerified       *bool        `json:"replay_verified,omitempty"`
 	CreatedAt            time.Time    `gorm:"not null" json:"created_at"`
 	UpdatedAt            time.Time    `gorm:"not null" json:"updated_at"`
+	// PhaseReviews and PhaseReviewLogs are populated by the service for detail
+	// responses; they are not columns of deviation_analyses.
+	PhaseReviews    []PhaseReview `gorm:"-" json:"-"`
+	PhaseReviewLogs []AuditLog    `gorm:"-" json:"-"`
 }
 func (DeviationAnalysis) TableName() string                    { return "deviation_analyses" }
 func (a DeviationAnalysis) ReviewerSeparated(userID uint) bool { return a.InitiatedBy != userID }

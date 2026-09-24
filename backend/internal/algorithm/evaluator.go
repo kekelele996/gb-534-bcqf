@@ -11,7 +11,11 @@ import (
 	"fermentation-kinetics-deviation-analysis/backend/internal/timeseries"
 	"fermentation-kinetics-deviation-analysis/backend/internal/util"
 )
-const Version = "phase-dtw-v1.0.0"
+const Version = "phase-dtw-v1.1.0"
+// PhaseConstraintVersionV1 is the original algorithm version. Replay keeps
+// decoding and re-evaluating snapshots frozen under v1 so historical results
+// remain byte-for-byte reproducible.
+const PhaseConstraintVersionV1 = "phase-dtw-v1.0.0"
 type PhaseBoundary struct {
 	Phase     constants.FermentationPhase `json:"phase"`
 	StartHour float64                     `json:"start_hour"`
@@ -51,6 +55,11 @@ type PhaseEvidence struct {
 	WeightedDeviation float64            `json:"weighted_deviation"`
 	ChannelScores     map[string]float64 `json:"channel_scores"`
 	ObservedPoints    int                `json:"observed_points"`
+	// SuspectedCauses holds the rule hits attributed to this phase. It is nil
+	// for v1.0.0 replays and for phases with no rule hits (omitted from JSON),
+	// so frozen historical output stays byte-for-byte reproducible; the global
+	// suspected_causes_json remains the union across phases.
+	SuspectedCauses []string `json:"suspected_causes,omitempty"`
 }
 type AlignedPoint struct {
 	Phase                string  `json:"phase"`
@@ -93,10 +102,15 @@ func DecodeSnapshot(raw string) (Snapshot, error) {
 	if err := json.Unmarshal([]byte(raw), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("decode analysis snapshot: %w", err)
 	}
-	if snapshot.AlgorithmVersion != Version {
+	if !SupportsVersion(snapshot.AlgorithmVersion) {
 		return Snapshot{}, fmt.Errorf("snapshot algorithm %s is not supported by %s", snapshot.AlgorithmVersion, Version)
 	}
 	return snapshot, nil
+}
+// SupportsVersion reports whether frozen snapshots produced by algorithmVersion
+// can still be decoded and re-evaluated deterministically.
+func SupportsVersion(algorithmVersion string) bool {
+	return algorithmVersion == Version || algorithmVersion == PhaseConstraintVersionV1
 }
 func ValidateRecipeConfiguration(boundariesRaw, curvesRaw, toleranceRaw []byte, targetDuration float64) error {
 	boundaries, curves, tolerances, err := parseConfiguration(boundariesRaw, curvesRaw, toleranceRaw)
@@ -148,9 +162,11 @@ func ValidateRecipeConfiguration(boundariesRaw, curvesRaw, toleranceRaw []byte, 
 	return nil
 }
 func (e *Evaluator) Evaluate(snapshot Snapshot) (Result, error) {
-	if snapshot.AlgorithmVersion != Version {
+	if !SupportsVersion(snapshot.AlgorithmVersion) {
 		return Result{}, fmt.Errorf("unsupported algorithm version %q", snapshot.AlgorithmVersion)
 	}
+	// v1.0.0 output must stay byte-for-byte reproducible for frozen replay.
+	legacyV1 := snapshot.AlgorithmVersion == PhaseConstraintVersionV1
 	points, err := timeseries.DecodePoints(snapshot.PointsJSON)
 	if err != nil {
 		return Result{}, err
@@ -171,6 +187,13 @@ func (e *Evaluator) Evaluate(snapshot Snapshot) (Result, error) {
 		)
 		if phaseErr != nil {
 			return Result{}, phaseErr
+		}
+		if legacyV1 {
+			phaseEvidence.SuspectedCauses = nil
+		} else {
+			// Always emit a (possibly empty) list so the v1.1 per-phase
+			// attribution structure stays explicit for every phase.
+			phaseEvidence.SuspectedCauses = sortedCauseValues(phaseCauses)
 		}
 		evidence = append(evidence, phaseEvidence)
 		aligned = append(aligned, phaseAligned...)
@@ -402,6 +425,46 @@ func mean(values []float64) float64 {
 		total += value
 	}
 	return total / float64(len(values))
+}
+// sortedCauseValues returns the distinct rule-hit cause strings attributed to a
+// phase, sorted for deterministic output.
+func sortedCauseValues(causes map[string]string) []string {
+	if len(causes) == 0 {
+		return []string{}
+	}
+	values := make([]string, 0, len(causes))
+	for _, cause := range causes {
+		values = append(values, cause)
+	}
+	sort.Strings(values)
+	return values
+}
+// PhaseCandidateCauses re-derives the deterministic rule-hit causes per phase
+// from a frozen snapshot. It never mutates stored results and is used to offer
+// concrete exclusion choices for historical analyses whose frozen phase
+// evidence predates per-phase cause attribution.
+func PhaseCandidateCauses(snapshot Snapshot) (map[string][]string, error) {
+	points, err := timeseries.DecodePoints(snapshot.PointsJSON)
+	if err != nil {
+		return nil, err
+	}
+	boundaries, references, tolerances, err := parseConfiguration(
+		[]byte(snapshot.PhaseBoundariesJSON), []byte(snapshot.ReferenceCurvesJSON), []byte(snapshot.ToleranceProfileJSON),
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string][]string, len(boundaries))
+	for _, boundary := range boundaries {
+		_, _, phaseCauses, _, phaseErr := evaluatePhase(
+			points, snapshot.StartedAt, boundary, references, tolerances,
+		)
+		if phaseErr != nil {
+			return nil, phaseErr
+		}
+		result[string(boundary.Phase)] = sortedCauseValues(phaseCauses)
+	}
+	return result, nil
 }
 func clamp(value float64) float64 {
 	if value < 0 {

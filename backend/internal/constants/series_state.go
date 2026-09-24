@@ -73,7 +73,7 @@ const (
 var analysisTransitions = map[AnalysisState]map[AnalysisState]struct{}{
 	AnalysisQueued:        {AnalysisAnalyzing: {}},
 	AnalysisAnalyzing:     {AnalysisCompleted: {}, AnalysisFailed: {}},
-	AnalysisCompleted:     {AnalysisReviewed: {}, AnalysisVoided: {}},
+	AnalysisCompleted:     {AnalysisReviewed: {}, AnalysisInvestigating: {}, AnalysisVoided: {}},
 	AnalysisFailed:        {AnalysisVoided: {}},
 	AnalysisReviewed:      {AnalysisConfirmed: {}, AnalysisInvestigating: {}, AnalysisVoided: {}},
 	AnalysisConfirmed:     {AnalysisVoided: {}},

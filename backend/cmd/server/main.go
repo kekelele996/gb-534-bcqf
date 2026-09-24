@@ -45,14 +45,17 @@ func run(logger *slog.Logger) error {
 	recipeRepo := repository.NewCultureRecipeRepository(db)
 	seriesRepo := repository.NewSensorSeriesRepository(db)
 	analysisRepo := repository.NewDeviationAnalysisRepository(db)
+	phaseReviewRepo := repository.NewPhaseReviewRepository(db)
 	auditRepo := repository.NewAuditRepository(db)
 	userRepo := repository.NewUserRepository(db)
 	vesselHandler := handler.NewFermentationVesselHandler(service.NewFermentationVesselService(vesselRepo, auditRepo))
 	recipeHandler := handler.NewCultureRecipeHandler(service.NewCultureRecipeService(recipeRepo, vesselRepo, auditRepo))
 	seriesHandler := handler.NewSensorSeriesHandler(service.NewSensorSeriesService(seriesRepo, recipeRepo, vesselRepo, auditRepo))
-	analysisHandler := handler.NewDeviationAnalysisHandler(service.NewDeviationAnalysisService(
-		analysisRepo, recipeRepo, seriesRepo, auditRepo, algorithm.NewEvaluator(),
-	))
+	analysisService := service.NewDeviationAnalysisService(
+		analysisRepo, recipeRepo, seriesRepo, auditRepo, phaseReviewRepo, algorithm.NewEvaluator(),
+	)
+	analysisHandler := handler.NewDeviationAnalysisHandler(analysisService)
+	phaseReviewHandler := handler.NewPhaseReviewHandler(analysisService)
 	auth := middleware.NewAuthenticator(userRepo, cfg)
 	loginLimiter := middleware.NewRateLimiter(cfg.LoginLimitPerMinute)
 	importLimiter := middleware.NewRateLimiter(cfg.ImportLimitPerMinute)
@@ -77,7 +80,7 @@ func run(logger *slog.Logger) error {
 	router.RegisterFermentationVesselRoutes(api, vesselHandler)
 	router.RegisterCultureRecipeRoutes(api, recipeHandler)
 	router.RegisterSensorSeriesRoutes(api, seriesHandler, importLimiter)
-	router.RegisterDeviationAnalysisRoutes(api, analysisHandler, analysisLimiter)
+	router.RegisterDeviationAnalysisRoutes(api, analysisHandler, phaseReviewHandler, analysisLimiter)
 	api.GET("/audit-logs", middleware.RequirePermission(constants.PermissionAuditRead), middleware.AuditListHandler(auditRepo))
 	api.GET("/meta/enums", middleware.RequirePermission(constants.PermissionRead), func(c *gin.Context) {
 		util.Success(c, http.StatusOK, gin.H{

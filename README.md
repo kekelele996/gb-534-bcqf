@@ -15,6 +15,7 @@ docker compose up -d
 - 培养配方：管理四阶段边界、参考曲线、通道容差和版本生命周期，支持复制版本。
 - 传感器时序：导入多通道 JSON 数据，执行排序去重、缺失率检查、稳健缩放和状态迁移。
 - 偏差分析：冻结配方与时序输入，执行阶段约束 DTW，展示阶段证据、对齐曲线和疑似原因。
+- 高风险阶段逐项复核：加权偏差达到 20% 及以上的阶段由复核人逐个认可证据、排除具体疑似原因（须选原因并写依据）或退回调查（须写依据）；阶段由首个复核人接收，他人重复提交会被拒绝；每次处理都在审计中保留操作者与时间。未结论或存在退回调查阶段时确认被拦截并列出待处理项。
 - 复核与审计：强制发起人与确认人分离，记录 request ID、前后快照、输入哈希、算法版本和耗时。
 - 平台保护：JWT、RBAC、统一错误响应、登录/导入/分析限流、幂等键和并发条件更新。
 
@@ -103,6 +104,7 @@ docker compose up -d
 | `GET/POST` | `/api/v1/deviation-analyses` | 分析列表/幂等运行 |
 | `GET` | `/api/v1/deviation-analyses/:id` | 分析详情与冻结证据 |
 | `POST` | `/api/v1/deviation-analyses/:id/transition` | 复核、确认、调查或作废 |
+| `POST` | `/api/v1/deviation-analyses/:id/phase-reviews` | 逐阶段认可证据/排除疑似原因/退回调查 |
 | `POST` | `/api/v1/deviation-analyses/:id/replay` | 冻结输入确定性重放 |
 | `GET` | `/api/v1/audit-logs` | 审计筛选 |
 | `GET` | `/api/v1/meta/enums` | 共享枚举元数据 |
@@ -123,11 +125,13 @@ imported -> validated -> normalized -> ready -> superseded
 
 ```text
 queued -> analyzing -> completed -> reviewed -> confirmed
-            |              |          +-----> investigating -> reviewed
-            +-> failed     +-----------------> voided
+            |              |  └──────> investigating -> reviewed
+            +-> failed     └──────────────> voided
 ```
 
-算法按时间戳排序并去重，保留缺失率与长间隔证据；使用中位数和四分位距进行稳健缩放，再在 `lag/growth/production/harvest` 阶段边界内做确定性 DTW。结果包含持续时间、斜率、峰值时刻、曲线距离、多通道加权偏差、对齐点与原因规则命中。冻结输入和算法版本可重放，历史结果不会被覆盖。
+逐阶段复核（`phase_reviews`）在 `completed/reviewed/investigating` 期间进行：加权偏差 ≥ 20%（含）的阶段必须逐个给出结论。`accepted` 认可阶段证据；`excluded` 须选择该阶段命中的具体疑似原因并填写依据；`returned` 须填写依据并把分析整体置为 `investigating`。首个提交的复核人接收该阶段，其他复核人再提交返回 `409 PHASE_REVIEW_CLAIMED`；处理人本人可修订。任一高风险阶段无结论或仍为退回时，`confirmed` 返回 `409 PHASE_REVIEW_PENDING` 并在响应 `pending_review_phases` 中列出待处理项。
+
+算法按时间戳排序并去重，保留缺失率与长间隔证据；使用中位数和四分位距进行稳健缩放，再在 `lag/growth/production/harvest` 阶段边界内做确定性 DTW。结果包含持续时间、斜率、峰值时刻、曲线距离、多通道加权偏差、逐阶段疑似原因、对齐点与原因规则命中。冻结输入和算法版本可重放（当前 `phase-dtw-v1.1.0`，并保持 `phase-dtw-v1.0.0` 历史冻结结果逐字节可重放），历史结果不会被覆盖。
 
 ## 共享枚举位置
 
@@ -146,7 +150,14 @@ queued -> analyzing -> completed -> reviewed -> confirmed
 - 模型/DTO/算法/服务：`backend/internal/model/deviation_analysis.go`、`backend/internal/dto/deviation_analysis.go`、`backend/internal/algorithm/evaluator.go`、`backend/internal/service/deviation_analysis_service.go`
 - 测试：`backend/internal/algorithm/evaluator_test.go`、`backend/internal/constants/state_machine_test.go`、`backend/internal/service/deviation_analysis_service_test.go`
 - 前端类型与状态：`frontend/src/types/enums/deviation-level.ts`、`frontend/src/types/deviation-analysis.ts`、`frontend/src/stores/deviation-analysis.ts`
-- 组件与页面：`frontend/src/components/common/DeviationBadge.vue`、`frontend/src/pages/VesselsPage.vue`、`frontend/src/pages/AnalysesPage.vue`
+- 组件与页面：`frontend/src/components/common/DeviationBadge.vue`、`frontend/src/components/common/PhaseReviewPanel.vue`、`frontend/src/pages/VesselsPage.vue`、`frontend/src/pages/AnalysesPage.vue`
+
+`PhaseReviewDecision = accepted | excluded | returned`（高风险阶段逐项复核结论）：
+
+- 后端定义与阈值：`backend/internal/constants/phase_review.go`
+- 模型/仓储/DTO/服务/处理器/路由：`backend/internal/model/phase_review.go`、`backend/internal/repository/phase_review_repository.go`、`backend/internal/dto/phase_review.go`、`backend/internal/service/deviation_analysis_service.go`、`backend/internal/handler/phase_review_handler.go`、`backend/internal/router/deviation_analysis_router.go`
+- 前端类型/API/store/组件/页面：`frontend/src/types/deviation-analysis.ts`、`frontend/src/api/deviation-analysis.ts`、`frontend/src/stores/deviation-analysis.ts`、`frontend/src/components/common/PhaseReviewPanel.vue`、`frontend/src/pages/AnalysesPage.vue`
+- 测试：`backend/internal/service/phase_review_service_test.go`、`backend/internal/algorithm/evaluator_test.go`
 
 ## 环境变量与端口
 

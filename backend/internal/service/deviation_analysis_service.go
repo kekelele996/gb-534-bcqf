@@ -18,6 +18,7 @@ type DeviationAnalysisService struct {
 	recipes   repository.CultureRecipeRepository
 	series    repository.SensorSeriesRepository
 	audits    repository.AuditRepository
+	reviews   repository.PhaseReviewRepository
 	evaluator *algorithm.Evaluator
 	now       func() time.Time
 }
@@ -26,11 +27,12 @@ func NewDeviationAnalysisService(
 	recipes repository.CultureRecipeRepository,
 	series repository.SensorSeriesRepository,
 	audits repository.AuditRepository,
+	reviews repository.PhaseReviewRepository,
 	evaluator *algorithm.Evaluator,
 ) *DeviationAnalysisService {
 	return &DeviationAnalysisService{
-		analyses: analyses, recipes: recipes, series: series, audits: audits, evaluator: evaluator,
-		now: func() time.Time { return time.Now().UTC() },
+		analyses: analyses, recipes: recipes, series: series, audits: audits, reviews: reviews,
+		evaluator: evaluator, now: func() time.Time { return time.Now().UTC() },
 	}
 }
 func (s *DeviationAnalysisService) Run(
@@ -131,14 +133,56 @@ func (s *DeviationAnalysisService) Run(
 	return dto.NewDeviationAnalysisResponse(analysis), false, nil
 }
 func (s *DeviationAnalysisService) Get(ctx context.Context, id uint) (dto.DeviationAnalysisResponse, error) {
-	analysis, err := s.analyses.GetByID(ctx, id, true)
+	analysis, err := s.loadDetail(ctx, id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return dto.DeviationAnalysisResponse{}, util.NotFound("deviation analysis")
 		}
 		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load deviation analysis", err)
 	}
-	return dto.NewDeviationAnalysisResponse(analysis), nil
+	response := dto.NewDeviationAnalysisResponse(analysis)
+	s.fillLegacyCandidates(&analysis, &response)
+	return response, nil
+}
+// loadDetail fetches the analysis with preloads and attaches current phase
+// decisions plus their chronological audit trail.
+func (s *DeviationAnalysisService) loadDetail(ctx context.Context, id uint) (model.DeviationAnalysis, error) {
+	analysis, err := s.analyses.GetByID(ctx, id, true)
+	if err != nil {
+		return model.DeviationAnalysis{}, err
+	}
+	reviews, err := s.reviews.ListByAnalysis(ctx, id)
+	if err != nil {
+		return model.DeviationAnalysis{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load phase reviews", err)
+	}
+	analysis.PhaseReviews = reviews
+	logs, err := s.audits.ListByEntityActions(ctx, "deviation_analysis", id, []string{
+		constants.PhaseReviewActionAccepted, constants.PhaseReviewActionExcluded, constants.PhaseReviewActionReturned,
+	})
+	if err != nil {
+		return model.DeviationAnalysis{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load phase review history", err)
+	}
+	analysis.PhaseReviewLogs = logs
+	return analysis, nil
+}
+// fillLegacyCandidates re-derives per-phase rule-hit causes from the frozen
+// snapshot for historical results whose phase evidence predates per-phase
+// cause attribution. It never alters the stored result.
+func (s *DeviationAnalysisService) fillLegacyCandidates(analysis *model.DeviationAnalysis, response *dto.DeviationAnalysisResponse) {
+	if len(response.PhaseCandidateCauses) > 0 {
+		return
+	}
+	snapshot, err := algorithm.DecodeSnapshot(analysis.InputSnapshot)
+	if err != nil {
+		return
+	}
+	candidates, err := algorithm.PhaseCandidateCauses(snapshot)
+	if err != nil {
+		return
+	}
+	for phase, causes := range candidates {
+		response.PhaseCandidateCauses[phase] = causes
+	}
 }
 func (s *DeviationAnalysisService) List(
 	ctx context.Context, query dto.DeviationAnalysisQuery,
@@ -174,6 +218,16 @@ func (s *DeviationAnalysisService) Transition(
 		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeReviewerConflict,
 			"analysis initiator cannot confirm their own result")
 	}
+	if to == constants.AnalysisConfirmed {
+		reviews, err := s.reviews.ListByAnalysis(ctx, id)
+		if err != nil {
+			return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load phase reviews", err)
+		}
+		if pending := pendingHighRiskPhases(analysis.PhaseScoresJSON, reviews); len(pending) > 0 {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodePhaseReview,
+				"confirmation blocked: high-risk phases without a conclusion or returned for investigation: "+strings.Join(pending, ", "))
+		}
+	}
 	before := analysis
 	updates := map[string]any{"review_comment": strings.TrimSpace(request.Comment)}
 	if to == constants.AnalysisReviewed {
@@ -198,6 +252,141 @@ func (s *DeviationAnalysisService) Transition(
 		return dto.DeviationAnalysisResponse{}, err
 	}
 	return s.Get(ctx, id)
+}
+// ReviewPhase applies one reviewer decision to a high-risk phase. The first
+// reviewer to submit claims the phase; subsequent submissions from other
+// reviewers are rejected with PHASE_REVIEW_CLAIMED. A "returned" decision moves
+// the whole analysis into investigating.
+func (s *DeviationAnalysisService) ReviewPhase(
+	ctx context.Context, id uint, request dto.PhaseReviewRequest, actor util.Actor,
+) (dto.DeviationAnalysisResponse, error) {
+	analysis, err := s.analyses.GetByID(ctx, id, false)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return dto.DeviationAnalysisResponse{}, util.NotFound("deviation analysis")
+		}
+		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load deviation analysis", err)
+	}
+	state := constants.AnalysisState(analysis.AnalysisState)
+	if state != constants.AnalysisCompleted && state != constants.AnalysisReviewed && state != constants.AnalysisInvestigating {
+		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeStateTransition,
+			"phase review only applies to completed, reviewed, or investigating analyses")
+	}
+	if !analysis.ReviewerSeparated(actor.UserID) {
+		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusForbidden, util.CodeReviewerConflict,
+			"the analysis initiator cannot review their own result")
+	}
+	if !isHighRiskPhase(analysis.PhaseScoresJSON, request.Phase) {
+		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
+			"phase "+request.Phase+" is not a high-risk phase (weighted deviation >= 20%) and does not require an individual review")
+	}
+	decision := constants.PhaseReviewDecision(request.Decision)
+	rationale := strings.TrimSpace(request.Rationale)
+	cause := strings.TrimSpace(request.Cause)
+	if (decision == constants.PhaseReviewReturned || decision == constants.PhaseReviewExcluded) && rationale == "" {
+		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
+			"a written rationale is required when excluding a suspected cause or returning for investigation")
+	}
+	candidates := map[string]struct{}{}
+	if decision == constants.PhaseReviewExcluded {
+		candidates, err = s.phaseCandidates(analysis, request.Phase)
+		if err != nil {
+			return dto.DeviationAnalysisResponse{}, err
+		}
+		if len(candidates) == 0 {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
+				"no rule-hit suspected cause is available to exclude for phase "+request.Phase)
+		}
+		if cause == "" {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
+				"select the concrete suspected cause to exclude for phase "+request.Phase)
+		}
+		if _, ok := candidates[cause]; !ok {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusUnprocessableEntity, util.CodeValidation,
+				"the selected cause is not among the rule-hit suspected causes for phase "+request.Phase)
+		}
+	}
+	if decision != constants.PhaseReviewExcluded {
+		cause = ""
+	}
+	existing, err := s.reviews.ListByAnalysis(ctx, id)
+	if err != nil {
+		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to load phase reviews", err)
+	}
+	for _, review := range existing {
+		if review.Phase == request.Phase && review.ReviewedBy != actor.UserID {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodePhaseClaimed,
+				"phase "+request.Phase+" was already received by reviewer "+review.ReviewedByName+" and cannot be submitted by another reviewer")
+		}
+	}
+	review := model.PhaseReview{
+		AnalysisID: id, Phase: request.Phase, Decision: string(decision), Cause: cause,
+		Rationale: rationale, ReviewedBy: actor.UserID, ReviewedByName: actor.Username,
+		ReviewedAt: s.now(),
+	}
+	claimed, err := s.reviews.UpsertDecision(ctx, &review)
+	if err != nil {
+		return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to store phase review", err)
+	}
+	if !claimed {
+		var owner string
+		if current, listErr := s.reviews.ListByAnalysis(ctx, id); listErr == nil {
+			for _, item := range current {
+				if item.Phase == request.Phase {
+					owner = item.ReviewedByName
+				}
+			}
+		}
+		return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodePhaseClaimed,
+			"phase "+request.Phase+" was already received by another reviewer"+claimSuffix(owner))
+	}
+	if decision == constants.PhaseReviewReturned && state != constants.AnalysisInvestigating {
+		changed, transitionErr := s.analyses.Transition(ctx, id, analysis.AnalysisState, string(constants.AnalysisInvestigating), nil)
+		if transitionErr != nil {
+			return dto.DeviationAnalysisResponse{}, util.WrapError(http.StatusInternalServerError, util.CodeInternal, "unable to return analysis for investigation", transitionErr)
+		}
+		if !changed {
+			return dto.DeviationAnalysisResponse{}, util.NewError(http.StatusConflict, util.CodeConflict, "analysis state changed concurrently")
+		}
+	}
+	payload := map[string]any{
+		"phase": review.Phase, "decision": review.Decision, "cause": review.Cause, "rationale": review.Rationale,
+	}
+	if err := recordAudit(ctx, s.audits, actor, "deviation_analysis", id, constants.PhaseReviewAction(decision), nil, payload,
+		analysis.InputHash, analysis.AlgorithmVersion, 0); err != nil {
+		return dto.DeviationAnalysisResponse{}, err
+	}
+	return s.Get(ctx, id)
+}
+func claimSuffix(owner string) string {
+	if strings.TrimSpace(owner) == "" {
+		return ""
+	}
+	return " (" + owner + ")"
+}
+// phaseCandidates returns the concrete rule-hit causes selectable for a phase.
+func (s *DeviationAnalysisService) phaseCandidates(
+	analysis model.DeviationAnalysis, phase string,
+) (map[string]struct{}, error) {
+	result := map[string]struct{}{}
+	if embedded := dtoEmbeddedCauses(analysis.PhaseScoresJSON, phase); embedded != nil {
+		for _, cause := range embedded {
+			result[cause] = struct{}{}
+		}
+		return result, nil
+	}
+	snapshot, err := algorithm.DecodeSnapshot(analysis.InputSnapshot)
+	if err != nil {
+		return nil, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "frozen analysis snapshot is invalid", err)
+	}
+	candidates, err := algorithm.PhaseCandidateCauses(snapshot)
+	if err != nil {
+		return nil, util.WrapError(http.StatusUnprocessableEntity, util.CodeValidation, "unable to derive suspected causes for phase", err)
+	}
+	for _, cause := range candidates[phase] {
+		result[cause] = struct{}{}
+	}
+	return result, nil
 }
 func (s *DeviationAnalysisService) Replay(
 	ctx context.Context, id uint, actor util.Actor,

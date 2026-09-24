@@ -6,12 +6,14 @@ import (
 	"github.com/gin-gonic/gin"
 )
 func RegisterDeviationAnalysisRoutes(
-	api *gin.RouterGroup, h *handler.DeviationAnalysisHandler, runLimiter *middleware.RateLimiter,
+	api *gin.RouterGroup, h *handler.DeviationAnalysisHandler, phaseReviewHandler *handler.PhaseReviewHandler,
+	runLimiter *middleware.RateLimiter,
 ) {
 	group := api.Group("/deviation-analyses")
 	group.GET("", middleware.RequirePermission(constants.PermissionRead), h.List)
 	group.GET("/:id", middleware.RequirePermission(constants.PermissionRead), h.Get)
 	group.POST("", middleware.RequirePermission(constants.PermissionAnalysisRun), runLimiter.Middleware("analysis-run"), h.Run)
 	group.POST("/:id/transition", middleware.RequirePermission(constants.PermissionAnalysisReview), h.Transition)
+	group.POST("/:id/phase-reviews", middleware.RequirePermission(constants.PermissionAnalysisReview), phaseReviewHandler.Submit)
 	group.POST("/:id/replay", middleware.RequirePermission(constants.PermissionAnalysisRun), runLimiter.Middleware("analysis-replay"), h.Replay)
 }

@@ -218,6 +218,46 @@ code { font-family: "SFMono-Regular", Consolas, monospace; }
 }
 .review-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 7px; }
 
+.phase-score-grid article.phase-high-risk { background: #fdf2ee; border-color: #e2b49f; }
+.phase-score-grid .score-danger { color: #b2471f; }
+.phase-high-risk-flag { display: block; margin-top: 6px; color: #b2471f; font-size: .57rem; font-weight: 750; }
+.confirm-blocker { margin-top: 2px; }
+
+.phase-review-panel { margin-top: 20px; padding: 14px; background: #f7faf8; border: 1px solid var(--line-strong); border-radius: 7px; }
+.phase-review-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.phase-review-heading > div { display: flex; align-items: center; gap: 9px; }
+.phase-review-heading span { display: grid; gap: 2px; }
+.phase-review-heading strong { font-size: .78rem; }
+.phase-review-heading small { color: var(--muted); font-size: .61rem; }
+.phase-review-blocker { margin-top: 12px; }
+.phase-review-empty { margin-top: 12px; color: var(--muted); font-size: .68rem; }
+.phase-review-card {
+  margin-top: 12px; padding: 12px; background: var(--paper); border: 1px solid var(--line);
+  border-left: 3px solid var(--muted); border-radius: 6px; display: grid; gap: 9px;
+}
+.phase-review-card.is-pending { border-left-color: #d98a3a; }
+.phase-review-card.is-returned { border-left-color: #c24b3b; background: #fdf3f1; }
+.phase-review-card header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.phase-review-score { font-size: .92rem; color: #b2471f; font-variant-numeric: tabular-nums; }
+.phase-review-meta { display: flex; align-items: center; gap: 7px; color: #415047; font-size: .64rem; }
+.phase-review-cause { font-size: .68rem; color: #7a5b17; background: #faf3df; border-radius: 4px; padding: 6px 8px; }
+.phase-review-rationale { font-size: .68rem; color: #415047; background: #eef4f0; border-radius: 4px; padding: 6px 8px; }
+.phase-review-cause-select { width: 100%; }
+.phase-review-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.phase-review-claimed { margin: 0; }
+.phase-review-history { font-size: .64rem; }
+.phase-review-history summary { cursor: pointer; color: var(--muted); }
+.phase-review-history ul { margin: 8px 0 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+.phase-review-history li {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px;
+  padding: 7px 8px; background: #f2f6f3; border-radius: 5px;
+}
+.phase-review-history li p { grid-column: 1 / -1; margin: 0; color: #4d5b53; overflow-wrap: anywhere; }
+.phase-review-history time { color: var(--muted); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .phase-review-history li { grid-template-columns: 1fr; }
+}
+
 .drawer-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 14px; border-bottom: 2px solid var(--ink); }
 .drawer-heading > div { display: flex; align-items: center; gap: 9px; }
 .drawer-heading span { display: grid; }

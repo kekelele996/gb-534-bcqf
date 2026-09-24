@@ -127,6 +127,18 @@ func (r *userRepository) FindByUsername(ctx context.Context, username string) (m
 	}
 	return user, nil
 }
+func (r *auditRepository) ListByEntityActions(ctx context.Context, entityType string, entityID uint, actions []string) ([]model.AuditLog, error) {
+	if len(actions) == 0 {
+		return []model.AuditLog{}, nil
+	}
+	var logs []model.AuditLog
+	if err := r.db.WithContext(ctx).Model(&model.AuditLog{}).
+		Where("entity_type = ? AND entity_id = ? AND action IN ?", entityType, entityID, actions).
+		Order("created_at ASC, id ASC").Find(&logs).Error; err != nil {
+		return nil, fmt.Errorf("list entity action audit logs: %w", err)
+	}
+	return logs, nil
+}
 type AuditQuery struct {
 	EntityType, RequestID, Action string
 	ActorID                       uint
@@ -136,6 +148,7 @@ type AuditQuery struct {
 type AuditRepository interface {
 	Record(context.Context, model.AuditLog) error
 	List(context.Context, AuditQuery) ([]model.AuditLog, int64, error)
+	ListByEntityActions(ctx context.Context, entityType string, entityID uint, actions []string) ([]model.AuditLog, error)
 }
 type auditRepository struct{ db *gorm.DB }
 func NewAuditRepository(db *gorm.DB) AuditRepository { return &auditRepository{db: db} }

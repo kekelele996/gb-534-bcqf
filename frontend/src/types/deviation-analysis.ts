@@ -11,6 +11,7 @@ export interface PhaseScore {
   weighted_deviation: number
   channel_scores: Record<string, number>
   observed_points: number
+  suspected_causes?: string[]
 }
 export interface AlignedPoint {
   phase: string
@@ -19,6 +20,28 @@ export interface AlignedPoint {
   actual_value: number
   reference_elapsed_h: number
   reference_value: number
+}
+export type PhaseReviewDecision = 'accepted' | 'excluded' | 'returned'
+export interface PhaseReview {
+  phase: string
+  decision: PhaseReviewDecision
+  cause?: string
+  rationale: string
+  reviewed_by: number
+  reviewed_by_name: string
+  reviewed_at: string
+}
+export interface PhaseReviewEvent {
+  phase: string
+  action: string
+  decision: PhaseReviewDecision
+  cause?: string
+  rationale: string
+  actor_id: number
+  actor_name: string
+  actor_role: string
+  request_id: string
+  created_at: string
 }
 export interface DeviationAnalysis {
   id: number
@@ -43,6 +66,11 @@ export interface DeviationAnalysis {
   review_comment?: string
   replay_verified?: boolean
   sensor_series?: SensorSeries
+  phase_reviews: Record<string, PhaseReview>
+  phase_review_events: PhaseReviewEvent[]
+  phase_candidate_causes: Record<string, string[]>
+  pending_review_phases: string[]
+  high_risk_phases: string[]
   created_at: string
   updated_at: string
 }
